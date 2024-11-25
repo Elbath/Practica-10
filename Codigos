@@ -1,0 +1,286 @@
+Codigo 1 Para ESP-32
+#include <Wire.h>
+#include <MPU6050.h>
+#include <Adafruit_BMP085.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <esp_sleep.h>
+
+MPU6050 mpu;
+Adafruit_BMP085 bmp;
+
+#define SERVICE_UUID        "12345678-1234-1234-1234-1234567890ab"
+#define CHARACTERISTIC_UUID "87654321-4321-4321-4321-1234567890ab"
+#define BUTTON_PIN 15  // Pin del botón
+
+BLECharacteristic *pCharacteristic;
+bool deviceConnected = false;
+
+unsigned long lastTime = 0;
+const int dataInterval = 60000; // Intervalo de almacenamiento (1 minuto)
+int currentIndex = 0;
+const int dataBufferSize = 10; // Tamaño del buffer para guardar 10 muestras
+
+struct SensorData {
+  float gyroX, gyroY, gyroZ;    // Inclinación en cada eje
+  float temp;                   // Temperatura del BMP180
+};
+
+SensorData dataBuffer[dataBufferSize];
+
+class MyCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+  };
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+  }
+};
+
+void enterDeepSleep() {
+  Serial.println("Entrando en modo de sueño profundo...");
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_15, 0);  // Configura para despertar cuando el botón se presione
+  esp_deep_sleep_start();  // Entra en modo de sueño profundo
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  mpu.begin();
+  mpu.calcGyroOffsets(true);
+
+  if (!bmp.begin()) {
+    Serial.println("Error al iniciar BMP180");
+    while (1);
+  }
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);  // Configura el pin del botón con pull-up interno
+
+  // Configuración BLE
+  BLEDevice::init("ESP32_Sensor");
+  BLEServer *pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyCallbacks());
+
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(false);
+  pAdvertising->setMinPreferred(0x06);
+  BLEDevice::startAdvertising();
+
+  Serial.println("Esperando conexión BLE...");
+}
+
+void loop() {
+  // Revisa si el botón ha sido presionado para entrar en modo de sueño
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    delay(50);  // Debounce
+    if (digitalRead(BUTTON_PIN) == LOW) {
+      enterDeepSleep();
+    }
+  }
+
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastTime > dataInterval) {
+    // Lee y calcula inclinación del giroscopio
+    mpu.update();
+    float gyroX = atan2(mpu.getAccY(), mpu.getAccZ()) * 180 / PI;
+    float gyroY = atan2(-mpu.getAccX(), sqrt(mpu.getAccY() * mpu.getAccY() + mpu.getAccZ() * mpu.getAccZ())) * 180 / PI;
+    float gyroZ = mpu.getGyroZ();
+
+    // Lee la temperatura del BMP180
+    float temp = bmp.readTemperature();
+
+    // Almacena datos en el buffer
+    dataBuffer[currentIndex] = { gyroX, gyroY, gyroZ, temp };
+    currentIndex = (currentIndex + 1) % dataBufferSize;
+
+    lastTime = currentTime;
+  }
+
+  // Si está conectado, envía el buffer completo
+  if (deviceConnected) {
+    String jsonData = "[";
+    for (int i = 0; i < dataBufferSize; i++) {
+      jsonData += "{\"gyroX\":" + String(dataBuffer[i].gyroX) + ",\"gyroY\":" + String(dataBuffer[i].gyroY) +
+                  ",\"gyroZ\":" + String(dataBuffer[i].gyroZ) + ",\"temp\":" + String(dataBuffer[i].temp) + "}";
+      if (i < dataBufferSize - 1) jsonData += ",";
+    }
+    jsonData += "]";
+    pCharacteristic->setValue(jsonData.c_str());
+    pCharacteristic->notify();
+    
+    delay(2000); // Pausa para evitar saturar la conexión BLE
+  }
+
+Este código implementa un sistema IoT con un ESP32 que utiliza Bluetooth Low Energy (BLE) para transmitir datos de inclinación y temperatura en tiempo real. También incluye funcionalidad para ahorro de energía con el modo de "sueño profundo" (deep sleep) activado por un botón. A continuación, se explica su funcionamiento en detalle:
+
+1. Configuración inicial
+Librerías:
+
+Wire.h, MPU6050.h: Para comunicarse con el sensor MPU6050 (acelerómetro y giroscopio).
+Adafruit_BMP085.h: Para el sensor BMP180 (temperatura).
+BLEDevice.h y relacionadas: Configuración de Bluetooth Low Energy (BLE).
+esp_sleep.h: Para gestionar el modo de bajo consumo del ESP32.
+Definiciones:
+
+UUIDs: Identificadores únicos para el servicio BLE y su característica asociada.
+BUTTON_PIN: Pin GPIO del botón que activa el modo de "sueño profundo".
+Variables:
+
+deviceConnected: Indica si hay un dispositivo conectado vía BLE.
+dataBuffer: Almacena los datos de inclinación y temperatura (buffer circular de 10 elementos).
+dataInterval: Intervalo entre mediciones (1 minuto).
+2. Configuración en setup()
+Inicialización de sensores:
+
+mpu.begin() y bmp.begin(): Configura los sensores MPU6050 y BMP180.
+El código calcula los offsets del giroscopio para mejorar la precisión.
+Configuración del botón:
+
+Se habilita el modo INPUT_PULLUP para el botón conectado al pin GPIO 15.
+Configuración BLE:
+
+El ESP32 se configura como un servidor BLE con un servicio y una característica.
+MyCallbacks gestiona la conexión/desconexión de dispositivos BLE.
+Se inicia la publicidad BLE para que otros dispositivos puedan detectar el ESP32.
+3. Ciclo principal (loop())
+Modo de "sueño profundo":
+
+Si se detecta que el botón está presionado (lectura LOW), se activa el modo de deep sleep.
+Se configura una interrupción para que el ESP32 despierte al presionar el botón.
+Lectura de sensores:
+Cada minuto:
+
+Inclinación:
+Los ángulos en los ejes X, Y y Z se calculan usando datos del MPU6050.
+Temperatura:
+Se mide la temperatura usando el BMP180.
+Almacenamiento:
+Los datos se guardan en un buffer circular, sobrescribiendo los más antiguos.
+Transmisión de datos por BLE:
+
+Si hay un dispositivo BLE conectado, se envía todo el contenido del buffer en formato JSON.
+Esto permite que el dispositivo receptor (como un smartphone) visualice los datos en tiempo real.
+4. Modo de "sueño profundo" (enterDeepSleep())
+Reduce el consumo energético al mínimo.
+Configura el ESP32 para despertar solo al presionar el botón.
+5. Funcionalidad adicional
+Buffer circular: Permite almacenar y transmitir solo los datos más recientes.
+Formato JSON: Facilita la compatibilidad con aplicaciones móviles para la visualización y análisis de los datos.
+
+Codigo 2 para la app
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothGatt;
+import android.bluetooth.BluetoothGattCallback;
+import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattService;
+import android.bluetooth.BluetoothManager;
+import android.os.Bundle;
+import android.util.Log;
+import android.widget.Toast;
+import androidx.appcompat.app.AppCompatActivity;
+import com.github.mikephil.charting.charts.LineChart;
+import com.github.mikephil.charting.data.Entry;
+import com.github.mikephil.charting.data.LineData;
+import com.github.mikephil.charting.data.LineDataSet;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+public class MainActivity extends AppCompatActivity {
+    private static final String TAG = "MainActivity";
+    private static final String DEVICE_NAME = "ESP32_Sensor";
+    private static final String SERVICE_UUID = "12345678-1234-1234-1234-1234567890ab";
+    private static final String CHARACTERISTIC_UUID = "87654321-4321-4321-4321-1234567890ab";
+
+    private BluetoothAdapter bluetoothAdapter;
+    private BluetoothGatt bluetoothGatt;
+    private LineChart chart;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        chart = findViewById(R.id.chart);
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+
+        BluetoothDevice device = findDeviceByName(DEVICE_NAME);
+        if (device != null) {
+            connectToDevice(device);
+        } else {
+            Toast.makeText(this, "Dispositivo no encontrado", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private BluetoothDevice findDeviceByName(String name) {
+        for (BluetoothDevice device : bluetoothAdapter.getBondedDevices()) {
+            if (device.getName().equals(name)) {
+                return device;
+            }
+        }
+        return null;
+    }
+
+    private void connectToDevice(BluetoothDevice device) {
+        bluetoothGatt = device.connectGatt(this, false, new BluetoothGattCallback() {
+            @Override
+            public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
+                if (newState == BluetoothGatt.STATE_CONNECTED) {
+                    gatt.discoverServices();
+                }
+            }
+
+            @Override
+            public void onServicesDiscovered(BluetoothGatt gatt, int status) {
+                BluetoothGattService service = gatt.getService(java.util.UUID.fromString(SERVICE_UUID));
+                if (service != null) {
+                    BluetoothGattCharacteristic characteristic = service.getCharacteristic(java.util.UUID.fromString(CHARACTERISTIC_UUID));
+                    gatt.setCharacteristicNotification(characteristic, true);
+                }
+            }
+
+            @Override
+            public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
+                String json = characteristic.getStringValue(0);
+                updateChart(json);
+            }
+        });
+    }
+
+    private void updateChart(String jsonData) {
+        try {
+            JSONArray jsonArray = new JSONArray(jsonData);
+            LineData lineData = new LineData();
+            LineDataSet dataSet = new LineDataSet(null, "Datos de Sensor");
+
+            for (int i = 0; i < jsonArray.length(); i++) {
+                JSONObject obj = jsonArray.getJSONObject(i);
+                float temp = (float) obj.getDouble("temp");
+                dataSet.addEntry(new Entry(i, temp));
+            }
+
+            lineData.addDataSet(dataSet);
+            runOnUiThread(() -> chart.setData(lineData));
+        } catch (Exception e) {
+            Log.e(TAG, "Error parsing JSON", e);
+        }
+    }
+}
+
+La aplicación busca y se conecta al dispositivo BLE llamado "ESP32_Sensor".
+Una vez conectada, recibe datos en formato JSON desde la característica BLE configurada.
+Los datos se procesan, extrayendo las temperaturas.
+Las temperaturas se grafican en tiempo real en un gráfico de línea utilizando MPAndroidChart.
